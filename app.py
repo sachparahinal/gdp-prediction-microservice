@@ -1,85 +1,54 @@
-from flask import Flask, request, jsonify
-import torch
-import torch.nn as nn
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+import numpy as np
 
-app = Flask(__name__)
+app = FastAPI(
+    title="GDP Prediction Microservice",
+    description="Predict GDP per capita using a polynomial regression model (NumPy).",
+    version="1.0.0",
+)
 
-# Model definition (same as training)
-class Polynomial3(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.a = nn.Parameter(torch.randn(()))
-        self.b = nn.Parameter(torch.randn(()))
-        self.c = nn.Parameter(torch.randn(()))
-        self.d = nn.Parameter(torch.randn(()))
+# Training data used previously
+GDP_VALUES = np.array([
+    135.0, 106.0, 105.0, 95.0, 88.0,
+    85.0, 82.0, 81.0, 73.0, 65.0,
+    63.0, 61.0, 60.0, 58.0, 57.0,
+    55.0, 54.0, 52.0, 51.0, 42.0,
+    51.0, 35.0, 39.0, 33.0, 54.0,
+    30.0, 31.0, 28.0, 23.0, 21.0
+], dtype=np.float32)
 
-    def forward(self, x):
-        return self.a + self.b * x + self.c * x ** 2 + self.d * x ** 3
+RANKS = np.arange(1, 31, dtype=np.float32)
+MIN_RANK = 1
+MAX_RANK = 30
 
-# Load model
-model = Polynomial3()
-checkpoint = torch.load('gdp_polynomial_model.pth', map_location=torch.device('cpu'))
-model.load_state_dict(checkpoint['model_state_dict'])
-model.eval()
+# Train 3rd-degree polynomial model
+coeffs = np.polyfit(RANKS, GDP_VALUES, 3)
+model = np.poly1d(coeffs)
 
-# Normalization parameters
-X_MIN = 1.0
-X_MAX = 30.0
+class RankRequest(BaseModel):
+    ranks: list[int]
 
-def normalize_rank(rank):
-    """Normalize country rank to [-1, 1] range"""
-    return 2 * (rank - X_MIN) / (X_MAX - X_MIN) - 1
-
-@app.route('/')
+@app.get("/")
 def home():
-    return jsonify({
-        "service": "GDP Prediction Microservice",
-        "description": "Predicts GDP per capita based on country economic rank",
-        "endpoints": {
-            "/": "Service information (this page)",
-            "/predict": "POST - Predict GDP for a given rank",
-            "/health": "GET - Health check"
-        },
-        "example": {
-            "url": "/predict",
-            "method": "POST",
-            "body": {"rank": 5},
-            "response": {"rank": 5, "predicted_gdp": 92.6, "unit": "thousands USD"}
-        }
-    })
+    return {
+        "message": "GDP Prediction Microservice Running",
+        "example_single": "/predict?rank=5",
+        "example_batch": {"ranks": [1, 10, 20]},
+    }
 
-@app.route('/predict', methods=['POST'])
-def predict():
-    try:
-        data = request.get_json()
-        
-        if 'rank' not in data:
-            return jsonify({"error": "Missing 'rank' in request body"}), 400
-        
-        rank = float(data['rank'])
-        
-        if rank < 1 or rank > 30:
-            return jsonify({"error": "Rank must be between 1 and 30"}), 400
-        
-        # Normalize and predict
-        x_normalized = normalize_rank(rank)
-        x_tensor = torch.tensor([[x_normalized]], dtype=torch.float32)
-        
-        with torch.no_grad():
-            prediction = model(x_tensor).item()
-        
-        return jsonify({
-            "rank": int(rank),
-            "predicted_gdp": round(prediction, 2),
-            "unit": "thousands USD"
-        })
-    
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+@app.get("/predict")
+def predict(rank: int):
+    if rank < MIN_RANK or rank > MAX_RANK:
+        raise HTTPException(400, f"Rank must be between {MIN_RANK} and {MAX_RANK}.")
+    prediction = model(rank)
+    return {"rank": rank, "predicted_gdp": float(round(prediction, 2))}
 
-@app.route('/health')
-def health():
-    return jsonify({"status": "healthy", "model": "loaded"}), 200
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+@app.post("/predict_batch")
+def predict_batch(req: RankRequest):
+    results = []
+    for r in req.ranks:
+        if r < MIN_RANK or r > MAX_RANK:
+            raise HTTPException(400, f"Rank {r} out of valid range.")
+        results.append(float(round(model(r), 2)))
+    return {"ranks": req.ranks, "predictions": results}
